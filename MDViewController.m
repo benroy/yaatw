@@ -107,38 +107,56 @@
 }
 
 /**
- This is a comment
+ This is the callback that handles the results from the query to the direction service. The results contain a route which is a series of points.
+ We loop through the points until we find a pair that are at least 0.1 degree (~6 miles) apart. Then we create a box that is atleast
+ 0.1 degrees square, centered on the two (aforementioned) points. Then we use this box for the bounding coordinates of a yelp search.
+ Repeat until we run out of points in the path.
  */
 - (void)addDirections:(NSDictionary *)json {
     
-    NSDictionary *routes = [json objectForKey:@"routes"][0];
+    // Pull the results out
+    NSDictionary *routes         = [json   objectForKey:@"routes"][0];
+    NSDictionary *route          = [routes objectForKey:@"overview_polyline"];
+    NSString     *overview_route = [route  objectForKey:@"points"];
     
-    NSDictionary *route = [routes objectForKey:@"overview_polyline"];
-    NSString *overview_route = [route objectForKey:@"points"];
+
+    // Draw the directions on the map
     GMSPath *path = [GMSPath pathFromEncodedPath:overview_route];
     GMSPolyline *polyline = [GMSPolyline polylineWithPath:path];
     polyline.strokeWidth = 2;
     polyline.map = mapView_;
     
+    
+    // Initialize the array of yelp search boxes and businesses
     [boxes_ removeAllObjects];
     [businesses_ removeAllObjects];
     
+    
+    // Each yelp search box is defined by two points (opposite corners of the box)
     CLLocationCoordinate2D first = {0,0}, last = {0,0};
     
+
+    // I'm not sure why I made the condition iPoint+1, or futher down why last = ... iPoint+1
+    // But if I do what seems correct (remove the +1 in both cases), the boxes are no longer tightly packed
+    // right next to each other (?!). I need to spend some time to figure out why. For now it works.
     for (int iPoint = 0; iPoint + 1 < path.count; iPoint++) {
         
-        if (first.latitude == 0 && first.longitude == 0) first = [path coordinateAtIndex:iPoint];
+        // The first corner is just the first point we come across.
+        // We know this is the first (i.e. we haven't come across one yet) if it still has it's initial value of (0,0)
+        if (first.latitude == 0 && first.longitude == 0) {
+            first = [path coordinateAtIndex:iPoint];
+        }
+        
+        // If we already have a first point, consider this one the last
         last  = [path coordinateAtIndex:iPoint+1];
         
-        // Square should be roughly 6 miles on each side
+        // If first and last are too close, keep searching for a more distant last
         if (ABS(first.longitude - last.longitude) < 0.1 &&
             ABS(first.latitude - last.latitude) < 0.1) {
             continue;
         }
         
-        GMSPolygon *polygon = [[GMSPolygon alloc] init];
-        GMSMutablePath *polyPath = [GMSMutablePath path];
-        
+        // Expand the box so that it's at least 0.1 degrees (~6 miles) on both sides
         CLLocationCoordinate2D topLeft, topRight, botLeft, botRight;
         topLeft.latitude   = MIN(first.latitude,  last.latitude);
         topLeft.longitude  = MIN(first.longitude, last.longitude);
@@ -162,23 +180,37 @@
         botLeft.latitude   = botRight.latitude;
         botLeft.longitude  = topLeft.longitude;
         
+        // Draw the box on the map
+        GMSPolygon *polygon = [[GMSPolygon alloc] init];
+        GMSMutablePath *polyPath = [GMSMutablePath path];
         [polyPath addCoordinate:topRight];
         [polyPath addCoordinate:topLeft];
         [polyPath addCoordinate:botLeft];
         [polyPath addCoordinate:botRight];
         polygon.path = polyPath;
-        
         polygon.fillColor = [UIColor colorWithRed:0.25 green:0 blue:0 alpha:0.2f];
         polygon.strokeColor = [UIColor blackColor];
-        polygon.strokeWidth = 2;
+        polygon.strokeWidth = 1;
         polygon.map = mapView_;
         
-        NSString *bounds = [NSString stringWithFormat:@"bounds=%f,%f|%f,%f", topLeft.latitude, topLeft.longitude, botRight.latitude, botRight.longitude];
+        // Make a yelp query with the box coordinates and the bounds
+        NSString *bounds = [NSString stringWithFormat:@"bounds=%f,%f|%f,%f",
+                            topLeft.latitude,
+                            topLeft.longitude,
+                            botRight.latitude,
+                            botRight.longitude];
+        
         NSString *url = [NSString stringWithFormat:@"http://api.yelp.com/v2/search?term=food&sort=2&%@", bounds];
         url = [url stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
         NSURL *URL = [NSURL URLWithString:url];
-        OAConsumer *consumer = [[OAConsumer alloc] initWithKey:@"KEY" secret:@"SECRET"];
-        OAToken *token = [[OAToken alloc] initWithKey:@"KEY" secret:@"SECRET"];
+        
+        OAConsumer *consumer = [[OAConsumer alloc]
+                                initWithKey:@"cUwnjo94ZS_izMC-G6Ustg"
+                                     secret:@"_Buh6xBNIfn4V1jB6yg77JXrZpY"];
+        
+        OAToken *token = [[OAToken alloc]
+                          initWithKey:@"3cQhT-kzaRhsFIUZ3ey0Huuxr9ie7RKm"
+                            secret:@"DkonrAZa-nb7GFo_S7WF2qXP1RI"];
         
         id<OASignatureProviding, NSObject> provider = [[OAHMAC_SHA1SignatureProvider alloc] init];
         NSString *realm = nil;
@@ -194,18 +226,9 @@
         box.responseData = [[NSMutableData alloc] init];
         box.point = iPoint;
         
-        //[self prepare];
         [[NSURLConnection alloc] initWithRequest:request delegate:self];
         
         [boxes_ setObject:box forKey:request];
-        //[self waitForStatus:kGHUnitWaitStatusSuccess timeout:10.0];
-        
-        //id JSON = [_responseData yajl_JSON];
-        //GHTestLog(@"JSON: %@", [JSON yajl_JSONStringWithOptions:YAJLGenOptionsBeautify indentString:@"  "]);
-        
-        //[connection release];
-        //[request release];
-        
         
         // reset first to sentinel value
         first.longitude = 0;
@@ -300,13 +323,13 @@
             
             
             MDBusiness * bus = [[MDBusiness alloc] init];
-            bus.name       = [business objectForKey:@"name"];
-            bus.rating     = [[business objectForKey:@"rating"] doubleValue];
-            bus.numRatings = [[business objectForKey:@"review_count"] unsignedLongValue];
-            bus.address    = [address componentsJoinedByString:@", "];
+            bus.name       = [business   objectForKey:@"name"];
+            bus.rating     = [[business  objectForKey:@"rating"] doubleValue];
+            bus.numRatings = [[business  objectForKey:@"review_count"] unsignedLongValue];
+            bus.distance   = [[business  objectForKey:@"distance"] doubleValue];
+            bus.price      = [[business  objectForKey:@"price"] integerValue];
+            bus.address    = [address    componentsJoinedByString:@", "];
             bus.categories = [categories componentsJoinedByString:@", "];
-            bus.distance   = [[business objectForKey:@"distance"] doubleValue];
-            bus.price      = [[business objectForKey:@"price"] integerValue];
             
             [businesses_ addObject:bus];
             
